@@ -59,164 +59,7 @@ from MixVPR.dataloaders import HPointLocDataset, HPointLocDataloader
 from pathlib import Path
 import torch
 from torch import nn
-
-def simple_nms(scores, nms_radius: int):
-    """ Fast Non-maximum suppression to remove nearby points """
-    assert(nms_radius >= 0)
-
-    def max_pool(x):
-        return torch.nn.functional.max_pool2d(
-            x, kernel_size=nms_radius*2+1, stride=1, padding=nms_radius)
-
-    zeros = torch.zeros_like(scores)
-    max_mask = scores == max_pool(scores)
-    for _ in range(2):
-        supp_mask = max_pool(max_mask.float()) > 0
-        supp_scores = torch.where(supp_mask, zeros, scores)
-        new_max_mask = supp_scores == max_pool(supp_scores)
-        max_mask = max_mask | (new_max_mask & (~supp_mask))
-    return torch.where(max_mask, scores, zeros)
-
-
-def remove_borders(keypoints, scores, border: int, height: int, width: int):
-    """ Removes keypoints too close to the border """
-    mask_h = (keypoints[:, 0] >= border) & (keypoints[:, 0] < (height - border))
-    mask_w = (keypoints[:, 1] >= border) & (keypoints[:, 1] < (width - border))
-    mask = mask_h & mask_w
-    return keypoints[mask], scores[mask]
-
-
-def top_k_keypoints(keypoints, scores, k: int):
-    if k >= len(keypoints):
-        return keypoints, scores
-    scores, indices = torch.topk(scores, k, dim=0)
-    return keypoints[indices], scores
-
-
-def sample_descriptors(keypoints, descriptors, s: int = 8):
-    """ Interpolate descriptors at keypoint locations """
-    b, c, h, w = descriptors.shape
-    keypoints = keypoints - s / 2 + 0.5
-    keypoints /= torch.tensor([(w*s - s/2 - 0.5), (h*s - s/2 - 0.5)],
-                              ).to(keypoints)[None]
-    keypoints = keypoints*2 - 1  # normalize to (-1, 1)
-    args = {'align_corners': True} if torch.__version__ >= '1.3' else {}
-    descriptors = torch.nn.functional.grid_sample(
-        descriptors, keypoints.view(b, 1, -1, 2), mode='bilinear', **args)
-    descriptors = torch.nn.functional.normalize(
-        descriptors.reshape(b, c, -1), p=2, dim=1)
-    return descriptors
-
-
-class SuperPoint(nn.Module):
-    """SuperPoint Convolutional Detector and Descriptor
-
-    SuperPoint: Self-Supervised Interest Point Detection and
-    Description. Daniel DeTone, Tomasz Malisiewicz, and Andrew
-    Rabinovich. In CVPRW, 2019. https://arxiv.org/abs/1712.07629
-
-    """
-    default_config = {
-        'descriptor_dim': 256,
-        'nms_radius': 4,
-        'keypoint_threshold': 0.005,
-        'max_keypoints': -1,
-        'remove_borders': 4,
-    }
-
-    def __init__(self, config):
-        super().__init__()
-        self.config = {**self.default_config, **config}
-
-        self.relu = nn.ReLU(inplace=True)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        c1, c2, c3, c4, c5 = 64, 64, 128, 128, 256
-
-        self.conv1a = nn.Conv2d(1, c1, kernel_size=3, stride=1, padding=1)
-        self.conv1b = nn.Conv2d(c1, c1, kernel_size=3, stride=1, padding=1)
-        self.conv2a = nn.Conv2d(c1, c2, kernel_size=3, stride=1, padding=1)
-        self.conv2b = nn.Conv2d(c2, c2, kernel_size=3, stride=1, padding=1)
-        self.conv3a = nn.Conv2d(c2, c3, kernel_size=3, stride=1, padding=1)
-        self.conv3b = nn.Conv2d(c3, c3, kernel_size=3, stride=1, padding=1)
-        self.conv4a = nn.Conv2d(c3, c4, kernel_size=3, stride=1, padding=1)
-        self.conv4b = nn.Conv2d(c4, c4, kernel_size=3, stride=1, padding=1)
-
-        self.convPa = nn.Conv2d(c4, c5, kernel_size=3, stride=1, padding=1)
-        self.convPb = nn.Conv2d(c5, 65, kernel_size=1, stride=1, padding=0)
-
-        self.convDa = nn.Conv2d(c4, c5, kernel_size=3, stride=1, padding=1)
-        self.convDb = nn.Conv2d(
-            c5, self.config['descriptor_dim'],
-            kernel_size=1, stride=1, padding=0)
-
-        # path = Path(__file__).parent / 'weights/superpoint_v1.pth'
-        # self.load_state_dict(torch.load(str(path)))
-
-        mk = self.config['max_keypoints']
-        if mk == 0 or mk < -1:
-            raise ValueError('\"max_keypoints\" must be positive or \"-1\"')
-
-        print('Loaded SuperPoint model')
-
-    def forward(self, data):
-        """ Compute keypoints, scores, descriptors for image """
-        # Shared Encoder
-        x = self.relu(self.conv1a(data['image']))
-        x = self.relu(self.conv1b(x))
-        x = self.pool(x)
-        x = self.relu(self.conv2a(x))
-        x = self.relu(self.conv2b(x))
-        x = self.pool(x)
-        x = self.relu(self.conv3a(x))
-        x = self.relu(self.conv3b(x))
-        x = self.pool(x)
-        x = self.relu(self.conv4a(x))
-        x = self.relu(self.conv4b(x))
-
-        # Compute the dense keypoint scores
-        cPa = self.relu(self.convPa(x))
-        scores = self.convPb(cPa)
-        scores = torch.nn.functional.softmax(scores, 1)[:, :-1]
-        b, _, h, w = scores.shape
-        scores = scores.permute(0, 2, 3, 1).reshape(b, h, w, 8, 8)
-        scores = scores.permute(0, 1, 3, 2, 4).reshape(b, h*8, w*8)
-        scores = simple_nms(scores, self.config['nms_radius'])
-
-        # Extract keypoints
-        keypoints = [
-            torch.nonzero(s > self.config['keypoint_threshold'])
-            for s in scores]
-        scores = [s[tuple(k.t())] for s, k in zip(scores, keypoints)]
-
-        # Discard keypoints near the image borders
-        keypoints, scores = list(zip(*[
-            remove_borders(k, s, self.config['remove_borders'], h*8, w*8)
-            for k, s in zip(keypoints, scores)]))
-
-        # Keep the k keypoints with highest score
-        if self.config['max_keypoints'] >= 0:
-            keypoints, scores = list(zip(*[
-                top_k_keypoints(k, s, self.config['max_keypoints'])
-                for k, s in zip(keypoints, scores)]))
-
-        # Convert (h, w) to (x, y)
-        keypoints = [torch.flip(k, [1]).float() for k in keypoints]
-
-        # Compute the dense descriptors
-        cDa = self.relu(self.convDa(x))
-        descriptors = self.convDb(cDa)
-        descriptors = torch.nn.functional.normalize(descriptors, p=2, dim=1)
-
-        # Extract descriptors
-        descriptors = [sample_descriptors(k[None], d[None], 8)[0]
-                       for k, d in zip(keypoints, descriptors)]
-
-        return {
-            'keypoints': keypoints,
-            'scores': scores,
-            'descriptors': descriptors,
-        }
-
+from transformers import AutoModelForDepthEstimation # Load depth anything model
 
 import os 
 tf_vpr = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -253,7 +96,7 @@ class VPRModel(pl.LightningModule):
                 miner_name='MultiSimilarityMiner', 
                 miner_margin=0.1,
                 faiss_gpu=False, 
-                superpoint_weights='./weights/superpoint_v1.pth'
+                model_id = "depth-anything/Depth-Anything-V2-Small-hf"
                  ):
         super().__init__()
         self.encoder_arch = backbone_arch
@@ -300,26 +143,15 @@ class VPRModel(pl.LightningModule):
         # perfect inekf
         # adjoint purpose
         
-        
-        # ----------------------------------
-        # get the backbone and the aggregator
-        self.backbone = helper.get_backbone(backbone_arch, pretrained, layers_to_freeze, layers_to_crop)
 
-        self.spatial_backbone = SuperPoint({'nms_radius': 4, 'keypoint_threshold': 0.005, 'max_keypoints': 1000})
-        #load the weights for superpoint 
-        self.spatial_backbone.load_state_dict(torch.load(os.path.join(superpoint_weights)))
+        self.depth_model = AutoModelForDepthEstimation.from_pretrained(model_id)
+        self.depth_encoder = self.depth_model.backbone
 
-        self.activation = {}
+        # Reduce feature map from 384 channels to 256 channels
+        self.reducers = nn.ModuleList([
+            nn.Conv2d(384, 256, kernel_size=1) for _ in range(4)
+        ])
 
-        self.spatial_conv1 = nn.Conv2d(256, 256, kernel_size=5)
-        self.spatial_conv2 = nn.Conv2d(256, 256, kernel_size=5)
-        
-
-        self.llm, self.llm_preprocess = clip.load("RN50", device=torch.device('cuda:0'))
-        self.llm.visual.layer1.register_forward_hook(self.get_activation('layer1'))
-        self.llm.visual.layer2.register_forward_hook(self.get_activation('layer2'))
-        self.llm.visual.layer3.register_forward_hook(self.get_activation('layer3'))
-        self.llm.visual.layer4.register_forward_hook(self.get_activation('layer4'))
         self.aggregator = helper.get_aggregator(agg_arch, agg_config)
         
     def get_activation(self, name):
@@ -337,33 +169,31 @@ class VPRModel(pl.LightningModule):
         #return the output
         
         # llm_in  = torch.cat(llm_in )
+   
         with torch.no_grad():
-            llm_feat = self.llm.encode_image(llm_x)
-            data = {'image': T.Grayscale()(x)}
-            superpoints_dict = self.spatial_backbone(data)
-        llm_feat = llm_feat.detach()
+            encoder_output = self.depth_encoder(x)
 
-        #go through all the batches from superpoints_dict 
-        N = x.shape[0]
-        spatial_feats = torch.zeros((x.shape[0], self.spatial_backbone.config['descriptor_dim'], x.shape[2], x.shape[3])).to(x.device)
-        for i in range(N):
-            kp = superpoints_dict['keypoints'][i].detach()
-            desc = superpoints_dict['descriptors'][i].detach()
+        processed_maps = []
+        for i, f in enumerate(encoder_output.feature_maps):
+            # Reshape from [B, N, C] to [B, C, H, W]
+            # N-1 to remove CLS token
+            b, n, c = f.shape
+            h = w = int((n - 1)**0.5)
             
-            #using pytorch gather the indices in kp and populate spatial_feats[i] with desc 
-            spatial_feats[i, :, kp[:,1].to(torch.long), kp[:,0].to(torch.long)] = desc
+            # Remove CLS token (index 0), then permute to [B, C, N-1]
+            feat_2d = f[:, 1:, :].transpose(1, 2).contiguous().reshape(b, c, h, w)
+            
+            # Reduce channels 384 -> 256
+            feat_reduced = self.reducers[i](feat_2d)
+            processed_maps.append(feat_reduced)
 
+        # Concatenate 4 stages along channel dimension -> [B, 1024, H, W]
+        depth_feats = torch.cat(processed_maps, dim=1)
 
-        spatial_feats = self.spatial_conv1(spatial_feats)
-        spatial_feats = nn.AvgPool2d(4)(spatial_feats)
-        spatial_feats = self.spatial_conv2(spatial_feats)
-        spatial_feats = nn.AvgPool2d(2)(spatial_feats)
-        x = self.backbone(x)
+        depth_feats = torch.nn.functional.interpolate(depth_feats, size=(20, 20), mode='bilinear', align_corners=False)
 
-        #resize pytorch tensor to BxCx20x20
-        spatial_feats = torch.nn.functional.interpolate(spatial_feats, size=(20, 20), mode='bilinear', align_corners=False)
-        llm_feat = torch.nn.functional.interpolate(self.activation["layer3"], size=(20, 20), mode='bilinear', align_corners=False)
-        x = torch.cat([x, llm_feat, spatial_feats], dim=1)
+        # cat dinov2 here
+        x = torch.cat([depth_feats], dim=1)
         x = self.aggregator(x)
         return x
     
