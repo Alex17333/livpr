@@ -138,7 +138,8 @@ class VPRModel(pl.LightningModule):
         # flat_config = faiss.GpuIndexFlatConfig()
         # flat_config.useFloat16 = True
         # flat_config.device = 0
-        self.embed_size = 4096
+        #self.embed_size = 4096
+        self.embed_size = agg_config.get('out_rows', 4) * agg_config.get('out_channels', 1024)
         self.validation_step_outputs = []
         self.l2_search = faiss.IndexFlatL2(self.embed_size)
         self.faiss_index = faiss.IndexIDMap(self.l2_search)
@@ -304,6 +305,10 @@ class VPRModel(pl.LightningModule):
         print("End of training !")
         self.batch_acc = []
 
+    def on_train_batch_start(self, batch, batch_idx):
+        self.dino.eval()
+        self.depth_encoder.eval()
+
     # For validation, we will also iterate step by step over the validation set
     # this is the way Pytorch Lghtning is made. All about modularity, folks.
     def validation_step(self, batch, batch_idx, dataloader_idx=None):
@@ -360,6 +365,13 @@ class VPRModel(pl.LightningModule):
                     offset += len(l)
                 r_list = feats[reference_indices]
                 q_list = feats[query_indices]
+
+                print("len(reference_indices):", len(reference_indices))
+                print("len(query_indices):", len(query_indices))
+                print("positives[0]:", positives[0])
+                print("new_positives[0]:", new_positives[0])
+                print("positives[1]:", positives[1])
+                print("new_positives[1]:", new_positives[1])
                 # new_positives = np.concatenate(new_positives)
 
             else:
@@ -377,32 +389,27 @@ class VPRModel(pl.LightningModule):
                                                 )
             
             retrieved_images = []
-            for idx, i in enumerate(query_indices[:5]):  # idx是predictions的index，i是dataset的index
-                mini = [val_dataset[i]] 
-                for j in predictions[idx][:5]:  # 用 idx 而不是 i
-                    mini.append(val_dataset[reference_indices[j]])  # j是reference的相對index，要轉回絕對index
+            for idx, i in enumerate(query_indices[:5]):
+                mini = [val_dataset[i]]
+                for j in predictions[idx][:5]:
+                    mini.append(val_dataset[reference_indices[j]])
                 retrieved_images.append(mini)
-
-            # retrieved_images = []
-            # for i in query_indices[:5]:
-            #     mini = [val_dataset[i]] 
-            #     for j in predictions[i][:5]:
-            #         mini.append(val_dataset[j])
-            #     retrieved_images.append(mini)
             
             #create a subplot of 5 rows and 6 columns 
             fig, ax = plt.subplots(5, 6, figsize=(20, 20))
-            #plot the images in retrived_images in each subplot 
-            retrieved_images = []
-            for idx, i in enumerate(query_indices[:5]):
-                item = val_dataset[i]
-                print(f"type: {type(item)}, ", end="")
-                if isinstance(item, (list, tuple)):
-                    print(f"len: {len(item)}, types: {[type(x) for x in item]}")
-                else:
-                    print(f"shape: {item.shape if hasattr(item, 'shape') else 'no shape'}")
-                break  # 只印一次就好
-                
+            for i in range(5):
+                for j in range(6):
+                    img, _, _ = retrieved_images[i][j] # dataset 回傳 (image, label) tuple
+                    if isinstance(img, torch.Tensor):
+                        img = img.permute(1, 2, 0).cpu().numpy()
+                        img = (img - img.min()) / (img.max() - img.min())  # normalize to 0~1
+                    ax[i, j].imshow(img)
+                    ax[i, j].axis('off')
+                    if j == 0:
+                        ax[i, j].set_title('Query', fontsize=8)
+                    else:
+                        ax[i, j].set_title(f'Top-{j}', fontsize=8)
+
             save_dir = f'./LOGS/retrieved_images'
             os.makedirs(save_dir, exist_ok=True)
             plt.savefig(f'{save_dir}/epoch_{self.current_epoch}_{val_set_name}.png',
