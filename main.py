@@ -485,7 +485,6 @@ if __name__ == '__main__':
         #             'out_channels': 2048},
 
         agg_arch='MixVPR',
-        agg_config={'in_channels' : 256+1024+1024, #change this to 1024 if no clip, but 2048 with clip 
         agg_config={'in_channels' : 256 + 1024 + 1024, #256 (DinoV2) + 1024 (Depth) + 1024 (ResNet50) = 2304 
                 'in_h' : 23,
                 'in_w' : 23,
