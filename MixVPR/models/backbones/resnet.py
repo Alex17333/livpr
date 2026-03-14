@@ -42,6 +42,7 @@ class ResNet(nn.Module):
             if 'resnext50' in model_name:
                 self.model = torchvision.models.resnext50_32x4d(weights=weights)
             elif 'resnet50' in model_name:
+                # self.model = torchvision.models.resnet50(pretrained=True)
                 self.model = torchvision.models.resnet50(weights=weights)
             elif '101' in model_name:
                 self.model = torchvision.models.resnet101(weights=weights)

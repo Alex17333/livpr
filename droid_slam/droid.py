@@ -84,8 +84,8 @@ class Droid:
 
             agg_arch='MixVPR',
             agg_config={'in_channels' : 2048+256, #change this to 1024 if no clip, but 2048 with clip 
-                    'in_h' : 20,
-                    'in_w' : 20,
+                    'in_h' : 23,
+                    'in_w' : 23,
                     'out_channels' : 1024,
                     'mix_depth' : 4,
                     'mlp_ratio' : 1,
@@ -107,23 +107,26 @@ class Droid:
             miner_name='MultiSimilarityMiner', # example: TripletMarginMiner, MultiSimilarityMiner, PairMarginMiner
             miner_margin=0.1,
             faiss_gpu=False,
-            superpoint_weights='', # path to superpoint_v1.pth goes here
+            # superpoint_weights='', # path to superpoint_v1.pth goes here
         )
         self.clipvpr_encoder.to(torch.device('cuda:0'))
 
         #load the model weights from the mode_p[ath]
         model_path = '' # path to resnet model weights
         # self.clipvpr_encoder.load_from_checkpoint(model_path)
-        self.clipvpr_encoder.load_state_dict(torch.load(model_path)['state_dict'])
+        # For test, comment this line
+        # self.clipvpr_encoder.load_state_dict(torch.load(model_path)['state_dict'])
         self.clipvpr_encoder.to(torch.device('cuda:0')).eval()
 
 
     def check_loop_candidates(self, image, i):
-        pil_img = torchvision.transforms.ToPILImage()(image.squeeze())
+        # pil_img = torchvision.transforms.ToPILImage()(image.squeeze())
         # print(droid.clipv=pr_encoder.llm.device()) 
         im_feat = self.clipvpr_encoder(
             self.clipvpr_encoder.tf_vpr(image).to(torch.device('cuda:0')),
-            self.clipvpr_encoder.llm_preprocess(pil_img).unsqueeze(0).to(torch.device('cuda:0')))
+            # self.clipvpr_encoder.llm_preprocess(pil_img).unsqueeze(0).to(torch.device('cuda:0')))
+            # self.clipvpr_encoder.tf_vpr(pil_img).unsqueeze(0).to(torch.device('cuda:0'))
+            )
         # print(im_feat.shape)
         #add into faiss_index with a specified index 
         if torch.any(i == self.video.tstamp):            

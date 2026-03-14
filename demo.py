@@ -103,6 +103,7 @@ if __name__ == '__main__':
     parser.add_argument("--backend_nms", type=int, default=3)
     parser.add_argument("--upsample", action="store_true")
     parser.add_argument("--reconstruction_path", help="path to saved reconstruction")
+    parser.add_argument("--datapath", type=str, default=".", help="path to dataset")
     args = parser.parse_args()
 
     args.stereo = False
@@ -127,6 +128,8 @@ if __name__ == '__main__':
             droid = Droid(args)
         
         droid.track(t, image, intrinsics=intrinsics)
+        if t > 200: 
+            break
 
     if args.reconstruction_path is not None:
         save_reconstruction(droid, args.reconstruction_path)

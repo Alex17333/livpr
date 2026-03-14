@@ -124,6 +124,7 @@ class VPRModel(pl.LightningModule):
         self.tf_vpr = T.Compose([
             T.Resize((322, 322), interpolation=T.InterpolationMode.BILINEAR),
             #add a transform convert_img_type to float from uint8
+            # T.ConvertImageDtype(torch.float32),
             T.ConvertImageDtype(torch.float32),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
         
@@ -154,9 +155,9 @@ class VPRModel(pl.LightningModule):
         # DinoV2 extractor
         out_channels = 256
         self.dino = torch.hub.load(
-            '/home/shared/.cache/torch/hub/facebookresearch_dinov2_main',
+            'facebookresearch/dinov2',
             vlm_model_id,
-            source='local'
+            # source='local'
         )        
         self.dino.eval()
         embed_dim = {'dinov2_vits14': 384, 'dinov2_vitb14': 768}[vlm_model_id]
